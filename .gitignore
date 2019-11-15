@@ -10,3 +10,13 @@
 
 # Output of the go coverage tool, specifically when used with LiteIDE
 *.out
+
+output.log
+client-grpc-linux-amd64
+client-grpc-darwin-amd64
+client-micro-linux-amd64
+client-micro-darwin-amd64
+server-grpc-linux-amd64
+server-grpc-darwin-amd64
+server-micro-linux-amd64
+server-micro-darwin-amd64
