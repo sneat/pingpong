@@ -11,14 +11,15 @@ import (
 	"unicode/utf8"
 
 	"github.com/golang/protobuf/ptypes"
+	"github.com/micro/cli"
 	"github.com/micro/go-micro"
+	"github.com/micro/go-micro/client/selector/static"
+	"github.com/micro/go-micro/registry/memory"
 	_ "github.com/micro/go-plugins/registry/consul"
 	"github.com/micro/go-plugins/wrapper/trace/opencensus"
 	"github.com/sirupsen/logrus"
 	pingpong "github.com/sneat/pingpong/proto"
 	"github.com/sneat/pingpong/service"
-	"github.com/spf13/pflag"
-	"github.com/spf13/viper"
 	"go.opencensus.io/stats"
 	"go.opencensus.io/stats/view"
 	"go.opencensus.io/trace"
@@ -31,18 +32,54 @@ var (
 func main() {
 	log := logrus.New()
 
-	pflag.String("micro_address", "127.0.0.1:60051", "The server address to send gRPC requests to")
-	pflag.String("metrics_listen", ":9889", "The address to bind the metrics HTTP server to")
-	pflag.String("jaeger_agent", "localhost:6831", "The endpoint URI that the jaeger-agent is running on")
-	pflag.String("jaeger_collector", "http://localhost:14268/api/traces", "The endpoint URI that the jaeger-collector is running on")
-	pflag.Parse()
-	viper.AutomaticEnv()
-	if err := viper.BindPFlags(pflag.CommandLine); err != nil {
-		log.WithError(err).Fatal("Could not bind viper command line flags")
-	}
-	log.WithField("viper", viper.AllSettings()).Info("All viper settings")
+	var (
+		jaegerAgent     string
+		jaegerCollector string
+		metricsListen   string
+		serverAddress   string
+	)
+	// Micro client needs a service to support discovery
+	svc := micro.NewService(
+		micro.Name("pinger"),
+		micro.Selector(static.NewSelector()),
+		micro.Registry(memory.NewRegistry()),
+		micro.WrapClient(opencensus.NewClientWrapper()),
+		micro.WrapHandler(opencensus.NewHandlerWrapper()),
+		micro.WrapSubscriber(opencensus.NewSubscriberWrapper()),
+		micro.Flags(
+			cli.StringFlag{
+				Name:        "metrics_listen",
+				Usage:       "The address to bind the metrics HTTP server to",
+				EnvVar:      "METRICS_LISTEN",
+				Value:       ":9889",
+				Destination: &metricsListen,
+			},
+			cli.StringFlag{
+				Name:        "jaeger_agent",
+				Usage:       "The endpoint URI that the jaeger-agent is running on",
+				EnvVar:      "JAEGER_AGENT",
+				Value:       "localhost:6831",
+				Destination: &jaegerCollector,
+			},
+			cli.StringFlag{
+				Name:        "jaeger_collector",
+				Usage:       "The endpoint URI that the jaeger-collector is running on",
+				EnvVar:      "JAEGER_COLLECTOR",
+				Value:       "http://localhost:14268/api/traces",
+				Destination: &jaegerAgent,
+			},
+			cli.StringFlag{
+				Name:        "destination_address",
+				Usage:       "The server address to send micro requests to",
+				EnvVar:      "DESTINATION_ADDRESS",
+				Value:       "127.0.0.1:60051", // Run the server with `MICRO_SERVER_ADDRESS=":60051"`
+				Destination: &serverAddress,
+			},
+		),
+	)
+	svc.Init()
 
-	metrics, err := service.NewClientMetrics(log, viper.GetString("jaeger_agent"), viper.GetString("jaeger_collector"))
+	metrics, err := service.NewServiceMetrics(log, jaegerAgent, jaegerCollector)
 	if err != nil {
 		log.WithError(err).Fatal("Could not create service metrics")
 	}
@@ -53,7 +90,6 @@ func main() {
 		log.Fatal(err)
 	}
 
-	metricsAddr := viper.GetString("metrics_listen")
 	go func() {
 		// Surface metrics and pprof
 		mux := http.NewServeMux()
@@ -64,41 +100,39 @@ func main() {
 		mux.Handle("/debug/pprof/profile", http.HandlerFunc(pprof.Profile))
 		mux.Handle("/debug/pprof/symbol", http.HandlerFunc(pprof.Symbol))
 		metricsSrv := http.Server{
-			Addr:    metricsAddr,
+			Addr:    metricsListen,
 			Handler: mux,
 		}
 		metricsListener, err := net.Listen("tcp", metricsSrv.Addr)
 		if err != nil {
 			log.WithError(err).WithField("addr", metricsSrv.Addr).Fatal("failed to listen")
 		}
-		metricsAddr = metricsListener.Addr().String()
 		if err := metricsSrv.Serve(metricsListener); err != nil {
 			log.WithError(err).Fatalf("failed to serve metrics")
 		}
+		log.Infof("Metrics and pprof running on %s", metricsListener.Addr().String())
 	}()
-	log.Infof("Metrics and pprof running on %s", metricsAddr)
 
-	// Micro client needs a service to support discovery
-	svc := micro.NewService(
-		micro.Name("pinger"),
-		micro.WrapClient(opencensus.NewClientWrapper()),
-		micro.WrapHandler(opencensus.NewHandlerWrapper()),
-		micro.WrapSubscriber(opencensus.NewSubscriberWrapper()),
-	)
-	svc.Init()
-	c := pingpong.NewPongerService("pingpong", svc.Client())
+	c := pingpong.NewPongerService(serverAddress, svc.Client())
 
-	log.WithField("address", viper.GetString("micro_address")).Info("Sending micro ping requests")
+	log.WithField("address", serverAddress).Info("Sending micro ping requests")
 
+	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
 		// Start the client service so that discovery works
 		if err := svc.Run(); err != nil {
 			log.Fatal(err)
 		}
+		cancel()
 	}()
 
 	i := 0
 	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
 		i++
 		r, err := sendPing(context.Background(), c)
 		if err != nil {

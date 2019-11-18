@@ -29,7 +29,7 @@ var (
 func main() {
 	log := logrus.New()
 
-	pflag.String("grpc_address", "127.0.0.1:50051", "The server address to send gRPC requests to")
+	pflag.String("destination_address", "127.0.0.1:50051", "The server address to send gRPC requests to")
 	pflag.String("metrics_listen", ":8889", "The address to bind the metrics HTTP server to")
 	pflag.String("jaeger_agent", "localhost:6831", "The endpoint URI that the jaeger-agent is running on")
 	pflag.String("jaeger_collector", "http://localhost:14268/api/traces", "The endpoint URI that the jaeger-collector is running on")
@@ -71,7 +71,7 @@ func main() {
 	log.Infof("Metrics and pprof running on %s", metricsAddr)
 
 	// Set up a connection to the server.
-	serverAddress := viper.GetString("grpc_address")
+	serverAddress := viper.GetString("destination_address")
 	log.WithField("address", serverAddress).Info("Connecting to server...")
 	conn, err := grpc.Dial(serverAddress, grpc.WithStatsHandler(&ocgrpc.ClientHandler{}), grpc.WithInsecure(), grpc.WithBlock())
 	if err != nil {
